@@ -46,7 +46,7 @@ struct PartialResponse {
 }
 
 struct Client {
-    conn: std::pin::Pin<Box<quiche::Connection>>,
+    conn: quiche::Connection,
 
     http3_conn: Option<quiche::h3::Connection>,
 
@@ -64,7 +64,7 @@ fn main() {
     let cmd = &args.next().unwrap();
 
     if args.len() != 0 {
-        println!("Usage: {}", cmd);
+        println!("Usage: {cmd}");
         println!("\nSee tools/apps/ for more complete implementations.");
         return;
     }
@@ -74,10 +74,8 @@ fn main() {
     let mut events = mio::Events::with_capacity(1024);
 
     // Create the UDP listening socket, and register it with the event loop.
-    let socket = net::UdpSocket::bind("127.0.0.1:4433").unwrap();
-    socket.set_nonblocking(true).unwrap();
-
-    let mut socket = mio::net::UdpSocket::from_std(socket);
+    let mut socket =
+        mio::net::UdpSocket::bind("127.0.0.1:4433".parse().unwrap()).unwrap();
     poll.registry()
         .register(&mut socket, mio::Token(0), mio::Interest::READABLE)
         .unwrap();
@@ -115,6 +113,8 @@ fn main() {
         ring::hmac::Key::generate(ring::hmac::HMAC_SHA256, &rng).unwrap();
 
     let mut clients = ClientMap::new();
+
+    let local_addr = socket.local_addr().unwrap();
 
     loop {
         // Find the shorter timeout from all the active connections.
@@ -263,9 +263,14 @@ fn main() {
 
                 debug!("New connection: dcid={:?} scid={:?}", hdr.dcid, scid);
 
-                let conn =
-                    quiche::accept(&scid, odcid.as_ref(), from, &mut config)
-                        .unwrap();
+                let conn = quiche::accept(
+                    &scid,
+                    odcid.as_ref(),
+                    local_addr,
+                    from,
+                    &mut config,
+                )
+                .unwrap();
 
                 let client = Client {
                     conn,
@@ -284,7 +289,10 @@ fn main() {
                 }
             };
 
-            let recv_info = quiche::RecvInfo { from };
+            let recv_info = quiche::RecvInfo {
+                to: socket.local_addr().unwrap(),
+                from,
+            };
 
             // Process potentially coalesced packets.
             let read = match client.conn.recv(pkt_buf, recv_info) {
@@ -360,6 +368,11 @@ fn main() {
                         Ok((_stream_id, quiche::h3::Event::Reset { .. })) => (),
 
                         Ok((_flow_id, quiche::h3::Event::Datagram)) => (),
+
+                        Ok((
+                            _prioritized_element_id,
+                            quiche::h3::Event::PriorityUpdate,
+                        )) => (),
 
                         Ok((_goaway_id, quiche::h3::Event::GoAway)) => (),
 
@@ -657,13 +670,13 @@ fn handle_writable(client: &mut Client, stream_id: u64) {
     }
 }
 
-fn hdrs_to_strings(hdrs: &[quiche::h3::Header]) -> Vec<(String, String)> {
+pub fn hdrs_to_strings(hdrs: &[quiche::h3::Header]) -> Vec<(String, String)> {
     hdrs.iter()
         .map(|h| {
-            (
-                String::from_utf8(h.name().into()).unwrap(),
-                String::from_utf8(h.value().into()).unwrap(),
-            )
+            let name = String::from_utf8_lossy(h.name()).to_string();
+            let value = String::from_utf8_lossy(h.value()).to_string();
+
+            (name, value)
         })
         .collect()
 }

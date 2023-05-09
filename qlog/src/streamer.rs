@@ -24,7 +24,6 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use crate::events::quic::QuicFrame;
 use crate::events::EventData;
 use crate::events::EventImportance;
 use crate::events::EventType;
@@ -36,21 +35,15 @@ use crate::events::EventType;
 /// provided `Trace`.
 ///
 /// Serialization is progressively driven by method calls; once log streaming
-/// is started, `event::Events` can be written using `add_event()`. Some
-/// events can contain an array of `QuicFrame`s, when writing such an event,
-/// the streamer enters a frame-serialization mode where frames are be
-/// progressively written using `add_frame()`. This mode is concluded using
-/// `finished_frames()`. While serializing frames, any attempts to log
-/// additional events are ignored.
+/// is started, `event::Events` can be written using `add_event()`.
 ///
 /// [`Write`]: https://doc.rust-lang.org/std/io/trait.Write.html
 use super::*;
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Eq, Debug)]
 pub enum StreamerState {
     Initial,
     Ready,
-    WritingFrames,
     Finished,
 }
 
@@ -60,17 +53,18 @@ pub struct QlogStreamer {
     qlog: QlogSeq,
     state: StreamerState,
     log_level: EventImportance,
-    first_frame: bool,
 }
 
 impl QlogStreamer {
-    /// Creates a QlogStreamer object.
+    /// Creates a [QlogStreamer] object.
     ///
-    /// It owns a `Qlog` object that contains the provided `Trace` containing
-    /// `Events`.
+    /// It owns a [QlogSeq] object that contains the provided [TraceSeq]
+    /// containing [Event]s.
     ///
-    /// All serialization will be written to the provided `Write` using the
+    /// All serialization will be written to the provided [`Write`] using the
     /// JSON-SEQ format.
+    ///
+    /// [`Write`]: https://doc.rust-lang.org/std/io/trait.Write.html
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         qlog_version: String, title: Option<String>, description: Option<String>,
@@ -93,15 +87,21 @@ impl QlogStreamer {
             qlog,
             state: StreamerState::Initial,
             log_level,
-            first_frame: false,
         }
     }
 
     /// Starts qlog streaming serialization.
     ///
-    /// This writes out the JSON-serialized form of all initial qlog information
-    /// `Event`s are separately appended using `add_event()` and
-    /// `add_event_with_instant()`.
+    /// This writes out the JSON-SEQ-serialized form of all initial qlog
+    /// information. [Event]s are separately appended using [add_event()],
+    /// [add_event_with_instant()], [add_event_now()],
+    /// [add_event_data_with_instant()], or [add_event_data_now()].
+    ///
+    /// [add_event()]: #method.add_event
+    /// [add_event_with_instant()]: #method.add_event_with_instant
+    /// [add_event_now()]: #method.add_event_now
+    /// [add_event_data_with_instant()]: #method.add_event_data_with_instant
+    /// [add_event_data_now()]: #method.add_event_data_now
     pub fn start_log(&mut self) -> Result<()> {
         if self.state != StreamerState::Initial {
             return Err(Error::Done);
@@ -119,7 +119,6 @@ impl QlogStreamer {
 
     /// Finishes qlog streaming serialization.
     ///
-    /// The JSON-serialized output has remaining close delimiters added.
     /// After this is called, no more serialization will occur.
     pub fn finish_log(&mut self) -> Result<()> {
         if self.state == StreamerState::Initial ||
@@ -135,32 +134,18 @@ impl QlogStreamer {
         Ok(())
     }
 
-    /// Writes a JSON-serialized `Event` using `std::time::Instant::now()`.
-    ///
-    /// Some qlog events can contain `QuicFrames`. If this is detected `true` is
-    /// returned and the streamer enters a frame-serialization mode that is only
-    /// concluded by `finish_frames()`. In this mode, attempts to log additional
-    /// events are ignored.
-    ///
-    /// If the event contains no array of `QuicFrames` return `false`.
-    pub fn add_event_now(&mut self, event: Event) -> Result<bool> {
+    /// Writes a JSON-SEQ-serialized [Event] using [std::time::Instant::now()].
+    pub fn add_event_now(&mut self, event: Event) -> Result<()> {
         let now = std::time::Instant::now();
 
         self.add_event_with_instant(event, now)
     }
 
-    /// Writes a JSON-serialized `Event` using the provided EventData and
-    /// Instant.
-    ///
-    /// Some qlog events can contain `QuicFrames`. If this is detected `true` is
-    /// returned and the streamer enters a frame-serialization mode that is only
-    /// concluded by `finish_frames()`. In this mode, attempts to log additional
-    /// events are ignored.
-    ///
-    /// If the event contains no array of `QuicFrames` return `false`.
+    /// Writes a JSON-SEQ-serialized [Event] using the provided
+    /// [std::time::Instant].
     pub fn add_event_with_instant(
         &mut self, mut event: Event, now: std::time::Instant,
-    ) -> Result<bool> {
+    ) -> Result<()> {
         if self.state != StreamerState::Ready {
             return Err(Error::InvalidState);
         }
@@ -181,17 +166,19 @@ impl QlogStreamer {
         self.add_event(event)
     }
 
-    /// Writes a JSON-serialized `Event` using the provided Instant.
-    ///
-    /// Some qlog events can contain `QuicFrames`. If this is detected `true` is
-    /// returned and the streamer enters a frame-serialization mode that is only
-    /// concluded by `finish_frames()`. In this mode, attempts to log additional
-    /// events are ignored.
-    ///
-    /// If the event contains no array of `QuicFrames` return `false`.
+    /// Writes a JSON-SEQ-serialized [Event] based on the provided [EventData]
+    /// at time [std::time::Instant::now()].
+    pub fn add_event_data_now(&mut self, event_data: EventData) -> Result<()> {
+        let now = std::time::Instant::now();
+
+        self.add_event_data_with_instant(event_data, now)
+    }
+
+    /// Writes a JSON-SEQ-serialized [Event] based on the provided [EventData]
+    /// and [std::time::Instant].
     pub fn add_event_data_with_instant(
         &mut self, event_data: EventData, now: std::time::Instant,
-    ) -> Result<bool> {
+    ) -> Result<()> {
         if self.state != StreamerState::Ready {
             return Err(Error::InvalidState);
         }
@@ -213,15 +200,8 @@ impl QlogStreamer {
         self.add_event(event)
     }
 
-    /// Writes a JSON-serialized `Event` using the provided Event.
-    ///
-    /// Some qlog events can contain `QuicFrames`. If this is detected `true` is
-    /// returned and the streamer enters a frame-serialization mode that is only
-    /// concluded by `finish_frames()`. In this mode, attempts to log additional
-    /// events are ignored.
-    ///
-    /// If the event contains no array of `QuicFrames` return `false`.
-    pub fn add_event(&mut self, event: Event) -> Result<bool> {
+    /// Writes a JSON-SEQ-serialized [Event] using the provided [Event].
+    pub fn add_event(&mut self, event: Event) -> Result<()> {
         if self.state != StreamerState::Ready {
             return Err(Error::InvalidState);
         }
@@ -231,78 +211,9 @@ impl QlogStreamer {
         }
 
         self.writer.as_mut().write_all(b"")?;
-
-        match event.data.contains_quic_frames() {
-            // If the event contains frames, we need to remove the closing JSON
-            // delimiters before writing out. These will be later restored by
-            // `finish_frames()`.
-            Some(frames_count) => {
-                match serde_json::to_string(&event) {
-                    Ok(mut ev_out) => {
-                        ev_out.truncate(ev_out.len() - 3);
-
-                        if frames_count == 0 {
-                            self.first_frame = true;
-                        }
-
-                        self.writer.as_mut().write_all(ev_out.as_bytes())?;
-                    },
-
-                    _ => return Err(Error::Done),
-                }
-
-                self.state = StreamerState::WritingFrames;
-            },
-
-            // If the event does not contain frames, it can be written
-            // immediately in full.
-            None => {
-                serde_json::to_writer(self.writer.as_mut(), &event)
-                    .map_err(|_| Error::Done)?;
-                self.writer.as_mut().write_all(b"\n")?;
-
-                self.state = StreamerState::Ready
-            },
-        }
-
-        Ok(event.data.contains_quic_frames().is_some())
-    }
-
-    /// Writes a JSON-serialized `QuicFrame`.
-    ///
-    /// Only valid while in the frame-serialization mode.
-    pub fn add_frame(&mut self, frame: QuicFrame, last: bool) -> Result<()> {
-        if self.state != StreamerState::WritingFrames {
-            return Err(Error::InvalidState);
-        }
-
-        if !self.first_frame {
-            self.writer.as_mut().write_all(b",")?;
-        } else {
-            self.first_frame = false;
-        }
-
-        serde_json::to_writer(self.writer.as_mut(), &frame)
+        serde_json::to_writer(self.writer.as_mut(), &event)
             .map_err(|_| Error::Done)?;
-
-        if last {
-            self.finish_frames()?;
-        }
-
-        Ok(())
-    }
-
-    /// Concludes `QuicFrame` streaming serialization.
-    ///
-    /// Only valid while in the frame-serialization mode.
-    pub fn finish_frames(&mut self) -> Result<()> {
-        if self.state != StreamerState::WritingFrames {
-            return Err(Error::InvalidState);
-        }
-
-        self.writer.as_mut().write_all(b"]}}\n")?;
-
-        self.state = StreamerState::Ready;
+        self.writer.as_mut().write_all(b"\n")?;
 
         Ok(())
     }
@@ -312,13 +223,19 @@ impl QlogStreamer {
     pub fn writer(&self) -> &Box<dyn std::io::Write + Send + Sync> {
         &self.writer
     }
+
+    pub fn start_time(&self) -> std::time::Instant {
+        self.start_time
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::events::quic;
+    use crate::events::quic::QuicFrame;
     use crate::events::RawInfo;
+    use smallvec::smallvec;
     use testing::*;
 
     #[test]
@@ -345,13 +262,15 @@ mod tests {
 
         let event_data1 = EventData::PacketSent(quic::PacketSent {
             header: pkt_hdr.clone(),
-            frames: Some(vec![frame1]),
+            frames: Some(smallvec![frame1]),
             is_coalesced: None,
             retry_token: None,
             stateless_reset_token: None,
             supported_versions: None,
             raw: raw.clone(),
             datagram_id: None,
+            send_at_time: None,
+            trigger: None,
         });
 
         let ev1 = Event::with_time(0.0, event_data1);
@@ -374,26 +293,30 @@ mod tests {
 
         let event_data2 = EventData::PacketSent(quic::PacketSent {
             header: pkt_hdr.clone(),
-            frames: Some(vec![]),
+            frames: Some(smallvec![frame2]),
             is_coalesced: None,
             retry_token: None,
             stateless_reset_token: None,
             supported_versions: None,
             raw: raw.clone(),
             datagram_id: None,
+            send_at_time: None,
+            trigger: None,
         });
 
         let ev2 = Event::with_time(0.0, event_data2);
 
         let event_data3 = EventData::PacketSent(quic::PacketSent {
             header: pkt_hdr,
-            frames: Some(vec![]),
+            frames: Some(smallvec![frame3]),
             is_coalesced: None,
             retry_token: None,
             stateless_reset_token: Some("reset_token".to_string()),
             supported_versions: None,
-            raw: raw.clone(),
+            raw,
             datagram_id: None,
+            send_at_time: None,
+            trigger: None,
         });
 
         let ev3 = Event::with_time(0.0, event_data3);
@@ -411,56 +334,27 @@ mod tests {
 
         // Before the log is started all other operations should fail.
         assert!(matches!(s.add_event(ev2.clone()), Err(Error::InvalidState)));
-        assert!(matches!(
-            s.add_frame(frame2.clone(), false),
-            Err(Error::InvalidState)
-        ));
-        assert!(matches!(s.finish_frames(), Err(Error::InvalidState)));
         assert!(matches!(s.finish_log(), Err(Error::InvalidState)));
 
-        // Once a log is started, can't write frames before an event.
+        // Start log and add a simple event.
         assert!(matches!(s.start_log(), Ok(())));
-        assert!(matches!(
-            s.add_frame(frame2.clone(), false),
-            Err(Error::InvalidState)
-        ));
-        assert!(matches!(s.finish_frames(), Err(Error::InvalidState)));
+        assert!(matches!(s.add_event(ev1), Ok(())));
 
-        // Initiate log with simple event.
-        assert!(matches!(s.add_event(ev1), Ok(true)));
-        assert!(matches!(s.finish_frames(), Ok(())));
-
-        // Some events hold frames; can't write any more events until frame
-        // writing is concluded.
-        assert!(matches!(s.add_event(ev2.clone()), Ok(true)));
-        assert!(matches!(s.add_event(ev2.clone()), Err(Error::InvalidState)));
-
-        // While writing frames, can't write events.
-        assert!(matches!(s.add_frame(frame2.clone(), false), Ok(())));
-        assert!(matches!(s.add_event(ev2.clone()), Err(Error::InvalidState)));
-        assert!(matches!(s.finish_frames(), Ok(())));
-
-        // Adding an event that includes both frames and raw data should
-        // be allowed.
-        assert!(matches!(s.add_event(ev3.clone()), Ok(true)));
-        assert!(matches!(s.add_frame(frame3.clone(), false), Ok(())));
-        assert!(matches!(s.finish_frames(), Ok(())));
+        // Add some more events.
+        assert!(matches!(s.add_event(ev2), Ok(())));
+        assert!(matches!(s.add_event(ev3.clone()), Ok(())));
 
         // Adding an event with an external time should work too.
         // For tests, it will resolve to 0 but we care about proving the API
         // here, not timing specifics.
         let now = std::time::Instant::now();
 
-        assert!(matches!(
-            s.add_event_with_instant(ev3.clone(), now),
-            Ok(true)
-        ));
-        assert!(matches!(s.add_frame(frame3.clone(), false), Ok(())));
-        assert!(matches!(s.finish_frames(), Ok(())));
+        assert!(matches!(s.add_event_with_instant(ev3, now), Ok(())));
 
         assert!(matches!(s.finish_log(), Ok(())));
 
         let r = s.writer();
+        #[allow(clippy::borrowed_box)]
         let w: &Box<std::io::Cursor<Vec<u8>>> = unsafe { std::mem::transmute(r) };
 
         let log_string = r#"{"qlog_version":"version","qlog_format":"JSON-SEQ","title":"title","description":"description","trace":{"vantage_point":{"type":"server"},"title":"Quiche qlog trace","description":"Quiche qlog trace description","configuration":{"time_offset":0.0}}}

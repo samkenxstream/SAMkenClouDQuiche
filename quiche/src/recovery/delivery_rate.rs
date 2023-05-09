@@ -79,13 +79,11 @@ impl Default for Rate {
 }
 
 impl Rate {
-    pub fn on_packet_sent(
-        &mut self, pkt: &mut Sent, bytes_in_flight: usize, now: Instant,
-    ) {
-        // No packets in flight yet?
+    pub fn on_packet_sent(&mut self, pkt: &mut Sent, bytes_in_flight: usize) {
+        // No packets in flight.
         if bytes_in_flight == 0 {
-            self.first_sent_time = now;
-            self.delivered_time = now;
+            self.first_sent_time = pkt.time_sent;
+            self.delivered_time = pkt.time_sent;
         }
 
         pkt.first_sent_time = self.first_sent_time;
@@ -162,7 +160,7 @@ impl Rate {
         self.end_of_app_limited != 0
     }
 
-    pub fn _delivered(&self) -> usize {
+    pub fn delivered(&self) -> usize {
         self.delivered
     }
 
@@ -170,11 +168,11 @@ impl Rate {
         self.rate_sample.delivery_rate
     }
 
-    pub fn _sample_rtt(&self) -> Duration {
+    pub fn sample_rtt(&self) -> Duration {
         self.rate_sample.rtt
     }
 
-    pub fn _sample_is_app_limited(&self) -> bool {
+    pub fn sample_is_app_limited(&self) -> bool {
         self.rate_sample.is_app_limited
     }
 }
@@ -206,6 +204,8 @@ mod tests {
 
     use crate::recovery::*;
 
+    use smallvec::smallvec;
+
     #[test]
     fn rate_check() {
         let config = Config::new(0xbabababa).unwrap();
@@ -218,7 +218,7 @@ mod tests {
         for pn in 0..2 {
             let pkt = Sent {
                 pkt_num: pn,
-                frames: vec![],
+                frames: smallvec![],
                 time_sent: now,
                 time_acked: None,
                 time_lost: None,
@@ -234,7 +234,7 @@ mod tests {
 
             r.on_packet_sent(
                 pkt,
-                packet::EPOCH_APPLICATION,
+                packet::Epoch::Application,
                 HandshakeStatus::default(),
                 now,
                 "",
@@ -253,7 +253,7 @@ mod tests {
                 rtt,
                 delivered: 0,
                 delivered_time: now,
-                first_sent_time: now - rtt,
+                first_sent_time: now.checked_sub(rtt).unwrap(),
                 is_app_limited: false,
             };
 
@@ -264,9 +264,9 @@ mod tests {
         r.delivery_rate.generate_rate_sample(rtt);
 
         // Bytes acked so far.
-        assert_eq!(r.delivery_rate._delivered(), 2400);
+        assert_eq!(r.delivery_rate.delivered(), 2400);
 
-        // Estimated delivery rate = (1200 x 2) / 0.5s = 48000.
+        // Estimated delivery rate = (1200 x 2) / 0.05s = 48000.
         assert_eq!(r.delivery_rate(), 48000);
     }
 
@@ -282,7 +282,7 @@ mod tests {
         for pn in 0..10 {
             let pkt = Sent {
                 pkt_num: pn,
-                frames: vec![],
+                frames: smallvec![],
                 time_sent: now,
                 time_acked: None,
                 time_lost: None,
@@ -298,15 +298,15 @@ mod tests {
 
             r.on_packet_sent(
                 pkt,
-                packet::EPOCH_APPLICATION,
+                packet::Epoch::Application,
                 HandshakeStatus::default(),
                 now,
                 "",
             );
         }
 
-        assert_eq!(r.app_limited(), false);
-        assert_eq!(r.delivery_rate._sample_is_app_limited(), false);
+        assert!(!r.app_limited());
+        assert!(!r.delivery_rate.sample_is_app_limited());
     }
 
     #[test]
@@ -321,7 +321,7 @@ mod tests {
         for pn in 0..5 {
             let pkt = Sent {
                 pkt_num: pn,
-                frames: vec![],
+                frames: smallvec![],
                 time_sent: now,
                 time_acked: None,
                 time_lost: None,
@@ -337,7 +337,7 @@ mod tests {
 
             r.on_packet_sent(
                 pkt,
-                packet::EPOCH_APPLICATION,
+                packet::Epoch::Application,
                 HandshakeStatus::default(),
                 now,
                 "",
@@ -354,18 +354,18 @@ mod tests {
             r.on_ack_received(
                 &acked,
                 25,
-                packet::EPOCH_APPLICATION,
+                packet::Epoch::Application,
                 HandshakeStatus::default(),
                 now,
                 "",
+                &mut Vec::new(),
             ),
-            Ok(()),
+            Ok((0, 0)),
         );
 
-        assert_eq!(r.app_limited(), true);
-
+        assert!(r.app_limited());
         // Rate sample is not app limited (all acked).
-        assert_eq!(r.delivery_rate._sample_is_app_limited(), false);
-        assert_eq!(r.delivery_rate._sample_rtt(), rtt);
+        assert!(!r.delivery_rate.sample_is_app_limited());
+        assert_eq!(r.delivery_rate.sample_rtt(), rtt);
     }
 }

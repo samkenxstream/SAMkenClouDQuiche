@@ -27,14 +27,17 @@
 use serde::Deserialize;
 use serde::Serialize;
 
+use smallvec::SmallVec;
+
 use super::connectivity::TransportOwner;
 use super::Bytes;
 use super::DataRecipient;
 use super::RawInfo;
 use super::Token;
 use crate::HexSlice;
+use crate::StatelessResetToken;
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum PacketType {
     Initial,
@@ -51,7 +54,7 @@ pub enum PacketType {
     Unknown,
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum PacketNumberSpace {
     Initial,
@@ -60,7 +63,7 @@ pub enum PacketNumberSpace {
 }
 
 #[serde_with::skip_serializing_none]
-#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 pub struct PacketHeader {
     pub packet_type: PacketType,
     pub packet_number: u64,
@@ -104,7 +107,7 @@ impl PacketHeader {
             None => (None, None),
         };
 
-        let version = version.map(|v| format!("{:x?}", v));
+        let version = version.map(|v| format!("{v:x?}"));
 
         PacketHeader {
             packet_type,
@@ -155,21 +158,21 @@ impl PacketHeader {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamType {
     Bidirectional,
     Unidirectional,
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamSide {
     Sending,
     Receiving,
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamState {
     // bidirectional stream states, draft-23 3.4.
@@ -199,32 +202,36 @@ pub enum StreamState {
     Destroyed,
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorSpace {
     TransportError,
     ApplicationError,
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum TransportError {
     NoError,
     InternalError,
-    ServerBusy,
+    ConnectionRefused,
     FlowControlError,
     StreamLimitError,
     StreamStateError,
     FinalSizeError,
     FrameEncodingError,
     TransportParameterError,
+    ConnectionIdLimitError,
     ProtocolViolation,
-    InvalidMigration,
+    InvalidToken,
+    ApplicationError,
     CryptoBufferExceeded,
-    Unknown,
+    KeyUpdateError,
+    AeadLimitReached,
+    NoViablePath,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum TransportEventType {
     VersionInformation,
@@ -250,31 +257,49 @@ pub enum TransportEventType {
     DataMoved,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
-pub enum TransportEventTrigger {
-    Line,
-    Retransmit,
+pub enum PacketSentTrigger {
+    RetransmitReordered,
+    RetransmitTimeout,
+    PtoProbe,
+    RetransmitCrypto,
+    CcBandwidthProbe,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum PacketReceivedTrigger {
     KeysUnavailable,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum PacketDroppedTrigger {
+    InternalError,
+    Rejected,
+    Unsupported,
+    Invalid,
+    ConnectionUnknown,
+    DecryptionFailure,
+    General,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum PacketBufferedTrigger {
+    Backpressure,
+    KeysUnavailable,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum SecurityEventType {
     KeyUpdated,
-    KeyRetired,
+    KeyDiscarded,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
-#[serde(rename_all = "snake_case")]
-pub enum SecurityEventTrigger {
-    Tls,
-    Implicit,
-    RemoteUpdate,
-    LocalUpdate,
-}
-
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum RecoveryEventType {
     ParametersSet,
@@ -285,16 +310,22 @@ pub enum RecoveryEventType {
     MarkedForRetransmit,
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
-pub enum RecoveryEventTrigger {
-    AckReceived,
-    PacketSent,
-    Alarm,
-    Unknown,
+pub enum CongestionStateUpdatedTrigger {
+    PersistentCongestion,
+    Ecn,
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum PacketLostTrigger {
+    ReorderingThreshold,
+    TimeThreshold,
+    PtoExpired,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum LossTimerEventType {
     Set,
@@ -302,21 +333,21 @@ pub enum LossTimerEventType {
     Cancelled,
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum TimerType {
     Ack,
     Pto,
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 #[serde(untagged)]
 pub enum AckedRanges {
     Single(Vec<Vec<u64>>),
     Double(Vec<(u64, u64)>),
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum QuicFrameTypeName {
     Padding,
@@ -385,8 +416,7 @@ pub enum QuicFrame {
     },
 
     NewToken {
-        length: String,
-        token: String,
+        token: Token,
     },
 
     Stream {
@@ -395,7 +425,7 @@ pub enum QuicFrame {
         length: u64,
         fin: Option<bool>,
 
-        raw: Option<Bytes>,
+        raw: Option<RawInfo>,
     },
 
     MaxData {
@@ -429,9 +459,9 @@ pub enum QuicFrame {
     NewConnectionId {
         sequence_number: u32,
         retire_prior_to: u32,
-        length: u64,
-        connection_id: String,
-        reset_token: String,
+        connection_id_length: Option<u8>,
+        connection_id: Bytes,
+        stateless_reset_token: Option<StatelessResetToken>,
     },
 
     RetireConnectionId {
@@ -447,9 +477,9 @@ pub enum QuicFrame {
     },
 
     ConnectionClose {
-        error_space: ErrorSpace,
-        error_code: u64,
-        raw_error_code: Option<u64>,
+        error_space: Option<ErrorSpace>,
+        error_code: Option<u64>,
+        error_code_value: Option<u64>,
         reason: Option<String>,
 
         trigger_frame_type: Option<u64>,
@@ -465,10 +495,12 @@ pub enum QuicFrame {
 
     Unknown {
         raw_frame_type: u64,
+        frame_type_value: Option<u64>,
+        raw: Option<RawInfo>,
     },
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct PreferredAddress {
     pub ip_v4: String,
     pub ip_v6: String,
@@ -477,11 +509,11 @@ pub struct PreferredAddress {
     pub port_v6: u16,
 
     pub connection_id: Bytes,
-    pub stateless_reset_token: Token,
+    pub stateless_reset_token: StatelessResetToken,
 }
 
 #[serde_with::skip_serializing_none]
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct VersionInformation {
     pub server_versions: Option<Vec<Bytes>>,
     pub client_versions: Option<Vec<Bytes>>,
@@ -489,7 +521,7 @@ pub struct VersionInformation {
 }
 
 #[serde_with::skip_serializing_none]
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct AlpnInformation {
     pub server_alpns: Option<Vec<Bytes>>,
     pub client_alpns: Option<Vec<Bytes>>,
@@ -497,7 +529,7 @@ pub struct AlpnInformation {
 }
 
 #[serde_with::skip_serializing_none]
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct TransportParametersSet {
     pub owner: Option<TransportOwner>,
 
@@ -509,7 +541,7 @@ pub struct TransportParametersSet {
     pub original_destination_connection_id: Option<Bytes>,
     pub initial_source_connection_id: Option<Bytes>,
     pub retry_source_connection_id: Option<Bytes>,
-    pub stateless_reset_token: Option<Token>,
+    pub stateless_reset_token: Option<StatelessResetToken>,
     pub disable_active_migration: Option<bool>,
 
     pub max_idle_timeout: Option<u64>,
@@ -529,7 +561,7 @@ pub struct TransportParametersSet {
 }
 
 #[serde_with::skip_serializing_none]
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct TransportParametersRestored {
     pub disable_active_migration: Option<bool>,
 
@@ -546,7 +578,7 @@ pub struct TransportParametersRestored {
 }
 
 #[serde_with::skip_serializing_none]
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct DatagramsReceived {
     pub count: Option<u16>,
 
@@ -556,7 +588,7 @@ pub struct DatagramsReceived {
 }
 
 #[serde_with::skip_serializing_none]
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct DatagramsSent {
     pub count: Option<u16>,
 
@@ -566,9 +598,9 @@ pub struct DatagramsSent {
 }
 
 #[serde_with::skip_serializing_none]
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct DatagramDropped {
-    raw: Option<RawInfo>,
+    pub raw: Option<RawInfo>,
 }
 
 #[serde_with::skip_serializing_none]
@@ -582,12 +614,14 @@ pub struct PacketReceived {
 
     pub retry_token: Option<Token>,
 
-    pub stateless_reset_token: Option<Bytes>,
+    pub stateless_reset_token: Option<StatelessResetToken>,
 
     pub supported_versions: Option<Vec<Bytes>>,
 
     pub raw: Option<RawInfo>,
     pub datagram_id: Option<u32>,
+
+    pub trigger: Option<PacketReceivedTrigger>,
 
     pub frames: Option<Vec<QuicFrame>>,
 }
@@ -603,43 +637,53 @@ pub struct PacketSent {
 
     pub retry_token: Option<Token>,
 
-    pub stateless_reset_token: Option<Bytes>,
+    pub stateless_reset_token: Option<StatelessResetToken>,
 
     pub supported_versions: Option<Vec<Bytes>>,
 
     pub raw: Option<RawInfo>,
     pub datagram_id: Option<u32>,
 
-    pub frames: Option<Vec<QuicFrame>>,
+    pub trigger: Option<PacketSentTrigger>,
+
+    pub send_at_time: Option<f32>,
+
+    pub frames: Option<SmallVec<[QuicFrame; 1]>>,
 }
 
 #[serde_with::skip_serializing_none]
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct PacketDropped {
     pub header: Option<PacketHeader>,
 
     pub raw: Option<RawInfo>,
     pub datagram_id: Option<u32>,
+
+    pub details: Option<String>,
+
+    pub trigger: Option<PacketDroppedTrigger>,
 }
 
 #[serde_with::skip_serializing_none]
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct PacketBuffered {
     pub header: Option<PacketHeader>,
 
     pub raw: Option<RawInfo>,
     pub datagram_id: Option<u32>,
+
+    pub trigger: Option<PacketBufferedTrigger>,
 }
 
 #[serde_with::skip_serializing_none]
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct PacketsAcked {
     pub packet_number_space: Option<PacketNumberSpace>,
     pub packet_numbers: Option<Vec<u64>>,
 }
 
 #[serde_with::skip_serializing_none]
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct StreamStateUpdated {
     pub stream_id: u64,
     pub stream_type: Option<StreamType>,
@@ -659,7 +703,7 @@ pub struct FramesProcessed {
 }
 
 #[serde_with::skip_serializing_none]
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct DataMoved {
     pub stream_id: Option<u64>,
     pub offset: Option<u64>,
@@ -668,7 +712,7 @@ pub struct DataMoved {
     pub from: Option<DataRecipient>,
     pub to: Option<DataRecipient>,
 
-    pub data: Option<Bytes>,
+    pub raw: Option<RawInfo>,
 }
 
 #[serde_with::skip_serializing_none]
@@ -708,21 +752,23 @@ pub struct MetricsUpdated {
 }
 
 #[serde_with::skip_serializing_none]
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct CongestionStateUpdated {
-    old: Option<String>,
-    new: String,
+    pub old: Option<String>,
+    pub new: String,
+
+    pub trigger: Option<CongestionStateUpdatedTrigger>,
 }
 
 #[serde_with::skip_serializing_none]
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct LossTimerUpdated {
-    timer_type: Option<TimerType>,
-    packet_number_space: Option<PacketNumberSpace>,
+    pub timer_type: Option<TimerType>,
+    pub packet_number_space: Option<PacketNumberSpace>,
 
-    event_type: LossTimerEventType,
+    pub event_type: LossTimerEventType,
 
-    delta: Option<f32>,
+    pub delta: Option<f32>,
 }
 
 #[serde_with::skip_serializing_none]
@@ -731,6 +777,8 @@ pub struct PacketLost {
     pub header: Option<PacketHeader>,
 
     pub frames: Option<Vec<QuicFrame>>,
+
+    pub trigger: Option<PacketLostTrigger>,
 }
 
 #[serde_with::skip_serializing_none]

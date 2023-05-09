@@ -44,7 +44,7 @@ fn main() {
     let cmd = &args.next().unwrap();
 
     if args.len() != 1 {
-        println!("Usage: {} URL", cmd);
+        println!("Usage: {cmd} URL");
         println!("\nSee tools/apps/ for more complete implementations.");
         return;
     }
@@ -68,10 +68,8 @@ fn main() {
 
     // Create the UDP socket backing the QUIC connection, and register it with
     // the event loop.
-    let socket = std::net::UdpSocket::bind(bind_addr).unwrap();
-    socket.set_nonblocking(true).unwrap();
-
-    let mut socket = mio::net::UdpSocket::from_std(socket);
+    let mut socket =
+        mio::net::UdpSocket::bind(bind_addr.parse().unwrap()).unwrap();
     poll.registry()
         .register(&mut socket, mio::Token(0), mio::Interest::READABLE)
         .unwrap();
@@ -105,9 +103,13 @@ fn main() {
 
     let scid = quiche::ConnectionId::from_ref(&scid);
 
+    // Get local address.
+    let local_addr = socket.local_addr().unwrap();
+
     // Create a QUIC connection and initiate handshake.
     let mut conn =
-        quiche::connect(url.domain(), &scid, peer_addr, &mut config).unwrap();
+        quiche::connect(url.domain(), &scid, local_addr, peer_addr, &mut config)
+            .unwrap();
 
     info!(
         "connecting to {:} from {:} with scid {}",
@@ -188,7 +190,10 @@ fn main() {
 
             debug!("got {} bytes", len);
 
-            let recv_info = quiche::RecvInfo { from };
+            let recv_info = quiche::RecvInfo {
+                to: local_addr,
+                from,
+            };
 
             // Process potentially coalesced packets.
             let read = match conn.recv(&mut buf[..len], recv_info) {
@@ -214,7 +219,7 @@ fn main() {
         if conn.is_established() && http3_conn.is_none() {
             http3_conn = Some(
                 quiche::h3::Connection::with_transport(&mut conn, &h3_config)
-                    .unwrap(),
+                .expect("Unable to create HTTP/3 connection, check the server's uni stream limit and window size"),
             );
         }
 
@@ -263,7 +268,7 @@ fn main() {
                             req_start.elapsed()
                         );
 
-                        conn.close(true, 0x00, b"kthxbye").unwrap();
+                        conn.close(true, 0x100, b"kthxbye").unwrap();
                     },
 
                     Ok((_stream_id, quiche::h3::Event::Reset(e))) => {
@@ -272,10 +277,12 @@ fn main() {
                             e
                         );
 
-                        conn.close(true, 0x00, b"kthxbye").unwrap();
+                        conn.close(true, 0x100, b"kthxbye").unwrap();
                     },
 
                     Ok((_flow_id, quiche::h3::Event::Datagram)) => (),
+
+                    Ok((_, quiche::h3::Event::PriorityUpdate)) => unreachable!(),
 
                     Ok((goaway_id, quiche::h3::Event::GoAway)) => {
                         info!("GOAWAY id={}", goaway_id);
@@ -333,18 +340,18 @@ fn main() {
 }
 
 fn hex_dump(buf: &[u8]) -> String {
-    let vec: Vec<String> = buf.iter().map(|b| format!("{:02x}", b)).collect();
+    let vec: Vec<String> = buf.iter().map(|b| format!("{b:02x}")).collect();
 
     vec.join("")
 }
 
-fn hdrs_to_strings(hdrs: &[quiche::h3::Header]) -> Vec<(String, String)> {
+pub fn hdrs_to_strings(hdrs: &[quiche::h3::Header]) -> Vec<(String, String)> {
     hdrs.iter()
         .map(|h| {
-            (
-                String::from_utf8(h.name().into()).unwrap(),
-                String::from_utf8(h.value().into()).unwrap(),
-            )
+            let name = String::from_utf8_lossy(h.name()).to_string();
+            let value = String::from_utf8_lossy(h.value()).to_string();
+
+            (name, value)
         })
         .collect()
 }

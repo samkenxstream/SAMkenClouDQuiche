@@ -29,7 +29,6 @@ use std::convert::TryInto;
 use crate::Error;
 use crate::Result;
 
-use crate::octets;
 use crate::packet;
 use crate::ranges;
 use crate::stream;
@@ -48,14 +47,14 @@ pub const MAX_DGRAM_OVERHEAD: usize = 2;
 pub const MAX_STREAM_OVERHEAD: usize = 12;
 pub const MAX_STREAM_SIZE: u64 = 1 << 62;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EcnCounts {
     ect0_count: u64,
     ect1_count: u64,
     ecn_ce_count: u64,
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Frame {
     Padding {
         len: usize,
@@ -185,8 +184,6 @@ impl Frame {
         b: &mut octets::Octets, pkt: packet::Type,
     ) -> Result<Frame> {
         let frame_type = b.get_varint()?;
-
-        // println!("GOT FRAME {:x}", frame_type);
 
         let frame = match frame_type {
             0x00 => {
@@ -429,7 +426,7 @@ impl Frame {
             },
 
             Frame::Crypto { data } => {
-                encode_crypto_header(data.off() as u64, data.len() as u64, b)?;
+                encode_crypto_header(data.off(), data.len() as u64, b)?;
 
                 b.put_bytes(data)?;
             },
@@ -446,7 +443,7 @@ impl Frame {
             Frame::Stream { stream_id, data } => {
                 encode_stream_header(
                     *stream_id,
-                    data.off() as u64,
+                    data.off(),
                     data.len() as u64,
                     data.fin(),
                     b,
@@ -642,7 +639,7 @@ impl Frame {
 
             Frame::Crypto { data } => {
                 1 + // frame type
-                octets::varint_len(data.off() as u64) + // offset
+                octets::varint_len(data.off()) + // offset
                 2 + // length, always encode as 2-byte varint
                 data.len() // data
             },
@@ -663,7 +660,7 @@ impl Frame {
             Frame::Stream { stream_id, data } => {
                 1 + // frame type
                 octets::varint_len(*stream_id) + // stream_id
-                octets::varint_len(data.off() as u64) + // offset
+                octets::varint_len(data.off()) + // offset
                 2 + // length, always encode as 2-byte varint
                 data.len() // data
             },
@@ -801,6 +798,16 @@ impl Frame {
         )
     }
 
+    pub fn probing(&self) -> bool {
+        matches!(
+            self,
+            Frame::Padding { .. } |
+                Frame::NewConnectionId { .. } |
+                Frame::PathChallenge { .. } |
+                Frame::PathResponse { .. }
+        )
+    }
+
     #[cfg(feature = "qlog")]
     pub fn to_qlog(&self) -> QuicFrame {
         match self {
@@ -865,15 +872,23 @@ impl Frame {
             },
 
             Frame::NewToken { token } => QuicFrame::NewToken {
-                length: token.len().to_string(),
-                token: "TODO: update to qlog-02 token format".to_string(),
+                token: qlog::Token {
+                    // TODO: pick the token type some how
+                    ty: Some(qlog::TokenType::Retry),
+                    raw: Some(qlog::events::RawInfo {
+                        data: qlog::HexSlice::maybe_string(Some(token)),
+                        length: Some(token.len() as u64),
+                        payload_length: None,
+                    }),
+                    details: None,
+                },
             },
 
             Frame::Stream { stream_id, data } => QuicFrame::Stream {
                 stream_id: *stream_id,
-                offset: data.off() as u64,
+                offset: data.off(),
                 length: data.len() as u64,
-                fin: data.fin().then(|| true),
+                fin: data.fin().then_some(true),
                 raw: None,
             },
 
@@ -930,13 +945,15 @@ impl Frame {
                 seq_num,
                 retire_prior_to,
                 conn_id,
-                ..
+                reset_token,
             } => QuicFrame::NewConnectionId {
                 sequence_number: *seq_num as u32,
                 retire_prior_to: *retire_prior_to as u32,
-                length: conn_id.len() as u64,
-                connection_id: "TODO: update to qlog-02 token format".to_string(),
-                reset_token: "TODO: update to qlog-02 token format".to_string(),
+                connection_id_length: Some(conn_id.len() as u8),
+                connection_id: format!("{}", qlog::HexSlice::new(conn_id)),
+                stateless_reset_token: qlog::HexSlice::maybe_string(Some(
+                    reset_token,
+                )),
             },
 
             Frame::RetireConnectionId { seq_num } =>
@@ -952,19 +969,19 @@ impl Frame {
             Frame::ConnectionClose {
                 error_code, reason, ..
             } => QuicFrame::ConnectionClose {
-                error_space: ErrorSpace::TransportError,
-                error_code: *error_code,
-                raw_error_code: None, // raw error is no different for us
-                reason: Some(String::from_utf8(reason.clone()).unwrap()),
+                error_space: Some(ErrorSpace::TransportError),
+                error_code: Some(*error_code),
+                error_code_value: None, // raw error is no different for us
+                reason: Some(String::from_utf8_lossy(reason).into_owned()),
                 trigger_frame_type: None, // don't know trigger type
             },
 
             Frame::ApplicationClose { error_code, reason } =>
                 QuicFrame::ConnectionClose {
-                    error_space: ErrorSpace::ApplicationError,
-                    error_code: *error_code,
-                    raw_error_code: None, // raw error is no different for us
-                    reason: Some(String::from_utf8(reason.clone()).unwrap()),
+                    error_space: Some(ErrorSpace::ApplicationError),
+                    error_code: Some(*error_code),
+                    error_code_value: None, // raw error is no different for us
+                    reason: Some(String::from_utf8_lossy(reason).into_owned()),
                     trigger_frame_type: None, // don't know trigger type
                 },
 
@@ -987,7 +1004,7 @@ impl std::fmt::Debug for Frame {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             Frame::Padding { len } => {
-                write!(f, "PADDING len={}", len)?;
+                write!(f, "PADDING len={len}")?;
             },
 
             Frame::Ping => {
@@ -1001,8 +1018,7 @@ impl std::fmt::Debug for Frame {
             } => {
                 write!(
                     f,
-                    "ACK delay={} blocks={:?} ecn_counts={:?}",
-                    ack_delay, ranges, ecn_counts
+                    "ACK delay={ack_delay} blocks={ranges:?} ecn_counts={ecn_counts:?}"
                 )?;
             },
 
@@ -1013,8 +1029,7 @@ impl std::fmt::Debug for Frame {
             } => {
                 write!(
                     f,
-                    "RESET_STREAM stream={} err={:x} size={}",
-                    stream_id, error_code, final_size
+                    "RESET_STREAM stream={stream_id} err={error_code:x} size={final_size}"
                 )?;
             },
 
@@ -1022,11 +1037,7 @@ impl std::fmt::Debug for Frame {
                 stream_id,
                 error_code,
             } => {
-                write!(
-                    f,
-                    "STOP_SENDING stream={} err={:x}",
-                    stream_id, error_code
-                )?;
+                write!(f, "STOP_SENDING stream={stream_id} err={error_code:x}")?;
             },
 
             Frame::Crypto { data } => {
@@ -1034,7 +1045,7 @@ impl std::fmt::Debug for Frame {
             },
 
             Frame::CryptoHeader { offset, length } => {
-                write!(f, "CRYPTO off={} len={}", offset, length)?;
+                write!(f, "CRYPTO off={offset} len={length}")?;
             },
 
             Frame::NewToken { .. } => {
@@ -1060,61 +1071,67 @@ impl std::fmt::Debug for Frame {
             } => {
                 write!(
                     f,
-                    "STREAM id={} off={} len={} fin={}",
-                    stream_id, offset, length, fin
+                    "STREAM id={stream_id} off={offset} len={length} fin={fin}"
                 )?;
             },
 
             Frame::MaxData { max } => {
-                write!(f, "MAX_DATA max={}", max)?;
+                write!(f, "MAX_DATA max={max}")?;
             },
 
             Frame::MaxStreamData { stream_id, max } => {
-                write!(f, "MAX_STREAM_DATA stream={} max={}", stream_id, max)?;
+                write!(f, "MAX_STREAM_DATA stream={stream_id} max={max}")?;
             },
 
             Frame::MaxStreamsBidi { max } => {
-                write!(f, "MAX_STREAMS type=bidi max={}", max)?;
+                write!(f, "MAX_STREAMS type=bidi max={max}")?;
             },
 
             Frame::MaxStreamsUni { max } => {
-                write!(f, "MAX_STREAMS type=uni max={}", max)?;
+                write!(f, "MAX_STREAMS type=uni max={max}")?;
             },
 
             Frame::DataBlocked { limit } => {
-                write!(f, "DATA_BLOCKED limit={}", limit)?;
+                write!(f, "DATA_BLOCKED limit={limit}")?;
             },
 
             Frame::StreamDataBlocked { stream_id, limit } => {
                 write!(
                     f,
-                    "STREAM_DATA_BLOCKED stream={} limit={}",
-                    stream_id, limit
+                    "STREAM_DATA_BLOCKED stream={stream_id} limit={limit}"
                 )?;
             },
 
             Frame::StreamsBlockedBidi { limit } => {
-                write!(f, "STREAMS_BLOCKED type=bidi limit={}", limit)?;
+                write!(f, "STREAMS_BLOCKED type=bidi limit={limit}")?;
             },
 
             Frame::StreamsBlockedUni { limit } => {
-                write!(f, "STREAMS_BLOCKED type=uni limit={}", limit)?;
+                write!(f, "STREAMS_BLOCKED type=uni limit={limit}")?;
             },
 
-            Frame::NewConnectionId { .. } => {
-                write!(f, "NEW_CONNECTION_ID (TODO)")?;
+            Frame::NewConnectionId {
+                seq_num,
+                retire_prior_to,
+                conn_id,
+                reset_token,
+            } => {
+                write!(
+                    f,
+                    "NEW_CONNECTION_ID seq_num={seq_num} retire_prior_to={retire_prior_to} conn_id={conn_id:02x?} reset_token={reset_token:02x?}",
+                )?;
             },
 
-            Frame::RetireConnectionId { .. } => {
-                write!(f, "RETIRE_CONNECTION_ID (TODO)")?;
+            Frame::RetireConnectionId { seq_num } => {
+                write!(f, "RETIRE_CONNECTION_ID seq_num={seq_num}")?;
             },
 
             Frame::PathChallenge { data } => {
-                write!(f, "PATH_CHALLENGE data={:02x?}", data)?;
+                write!(f, "PATH_CHALLENGE data={data:02x?}")?;
             },
 
             Frame::PathResponse { data } => {
-                write!(f, "PATH_RESPONSE data={:02x?}", data)?;
+                write!(f, "PATH_RESPONSE data={data:02x?}")?;
             },
 
             Frame::ConnectionClose {
@@ -1124,16 +1141,14 @@ impl std::fmt::Debug for Frame {
             } => {
                 write!(
                     f,
-                    "CONNECTION_CLOSE err={:x} frame={:x} reason={:x?}",
-                    error_code, frame_type, reason
+                    "CONNECTION_CLOSE err={error_code:x} frame={frame_type:x} reason={reason:x?}"
                 )?;
             },
 
             Frame::ApplicationClose { error_code, reason } => {
                 write!(
                     f,
-                    "APPLICATION_CLOSE err={:x} reason={:x?}",
-                    error_code, reason
+                    "APPLICATION_CLOSE err={error_code:x} reason={reason:x?}"
                 )?;
             },
 
@@ -1146,7 +1161,7 @@ impl std::fmt::Debug for Frame {
             },
 
             Frame::DatagramHeader { length } => {
-                write!(f, "DATAGRAM len={}", length)?;
+                write!(f, "DATAGRAM len={length}")?;
             },
         }
 
@@ -1351,7 +1366,7 @@ mod tests {
         };
 
         assert_eq!(wire_len, 1);
-        assert_eq!(&d[..wire_len], [0x01 as u8]);
+        assert_eq!(&d[..wire_len], [0x01_u8]);
 
         let mut b = octets::Octets::with_slice(&d);
         assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
@@ -2044,19 +2059,19 @@ mod tests {
 
         assert_eq!(wire_len, 15);
 
-        let mut b = octets::Octets::with_slice(&mut d);
+        let mut b = octets::Octets::with_slice(&d);
         assert_eq!(
             Frame::from_bytes(&mut b, packet::Type::Short),
             Ok(frame.clone())
         );
 
-        let mut b = octets::Octets::with_slice(&mut d);
+        let mut b = octets::Octets::with_slice(&d);
         assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_err());
 
-        let mut b = octets::Octets::with_slice(&mut d);
+        let mut b = octets::Octets::with_slice(&d);
         assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_ok());
 
-        let mut b = octets::Octets::with_slice(&mut d);
+        let mut b = octets::Octets::with_slice(&d);
         assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_err());
 
         let frame_data = match &frame {

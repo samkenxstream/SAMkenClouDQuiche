@@ -1,4 +1,4 @@
-// Copyright (C) 2020, Cloudflare, Inc.
+// Copyright (C) 2022, Cloudflare, Inc.
 // All rights reserved.
 //
 // Redistribution and use in source and binary forms, with or without
@@ -24,10 +24,23 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-#[macro_use]
-extern crate log;
+use super::*;
 
-pub mod args;
-pub mod client;
-pub mod common;
-pub mod sendto;
+use crate::recovery::Recovery;
+
+// BBR Functions when trasmitting packets.
+//
+pub fn bbr_on_transmit(r: &mut Recovery) {
+    bbr_handle_restart_from_idle(r);
+}
+
+// 4.3.4.4.  Restarting From Idle
+fn bbr_handle_restart_from_idle(r: &mut Recovery) {
+    if r.bytes_in_flight == 0 && r.delivery_rate.app_limited() {
+        r.bbr_state.idle_restart = true;
+
+        if r.bbr_state.state == BBRStateMachine::ProbeBW {
+            pacing::bbr_set_pacing_rate_with_gain(r, 1.0);
+        }
+    }
+}

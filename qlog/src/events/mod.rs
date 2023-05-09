@@ -35,7 +35,7 @@ use connectivity::ConnectivityEventType;
 use serde::Deserialize;
 use serde::Serialize;
 
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
 #[serde(untagged)]
 pub enum EventType {
     ConnectivityEventType(ConnectivityEventType),
@@ -52,16 +52,11 @@ pub enum EventType {
 
     GenericEventType(GenericEventType),
 
+    #[default]
     None,
 }
 
-impl Default for EventType {
-    fn default() -> Self {
-        EventType::None
-    }
-}
-
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub enum TimeFormat {
     Absolute,
     Delta,
@@ -177,7 +172,7 @@ impl From<EventType> for EventImportance {
 
             EventType::SecurityEventType(SecurityEventType::KeyUpdated) =>
                 EventImportance::Base,
-            EventType::SecurityEventType(SecurityEventType::KeyRetired) =>
+            EventType::SecurityEventType(SecurityEventType::KeyDiscarded) =>
                 EventImportance::Base,
 
             EventType::TransportEventType(TransportEventType::ParametersSet) =>
@@ -288,7 +283,7 @@ impl std::fmt::Display for EventCategory {
             EventCategory::Simulation => "simulation",
         };
 
-        write!(f, "{}", v)
+        write!(f, "{v}",)
     }
 }
 
@@ -336,8 +331,8 @@ impl From<&EventData> for EventType {
 
             EventData::KeyUpdated { .. } =>
                 EventType::SecurityEventType(SecurityEventType::KeyUpdated),
-            EventData::KeyRetired { .. } =>
-                EventType::SecurityEventType(SecurityEventType::KeyRetired),
+            EventData::KeyDiscarded { .. } =>
+                EventType::SecurityEventType(SecurityEventType::KeyDiscarded),
 
             EventData::VersionInformation { .. } =>
                 EventType::TransportEventType(
@@ -438,17 +433,18 @@ impl From<&EventData> for EventType {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum DataRecipient {
     User,
     Application,
     Transport,
     Network,
+    Dropped,
 }
 
 #[serde_with::skip_serializing_none]
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct RawInfo {
     pub length: Option<u64>,
     pub payload_length: Option<u64>,
@@ -485,7 +481,7 @@ pub enum EventData {
     KeyUpdated(security::KeyUpdated),
 
     #[serde(rename = "security:key_retired")]
-    KeyRetired(security::KeyRetired),
+    KeyDiscarded(security::KeyDiscarded),
 
     // Transport
     #[serde(rename = "transport:version_information")]
@@ -649,7 +645,7 @@ impl EventData {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum GenericEventType {
     ConnectionError,
@@ -661,7 +657,7 @@ pub enum GenericEventType {
     Marker,
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 #[serde(untagged)]
 pub enum ConnectionErrorCode {
     TransportError(TransportError),
@@ -669,7 +665,7 @@ pub enum ConnectionErrorCode {
     Value(u64),
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 #[serde(untagged)]
 pub enum ApplicationErrorCode {
     ApplicationError(ApplicationError),
@@ -677,7 +673,7 @@ pub enum ApplicationErrorCode {
 }
 
 // TODO
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum CryptoError {
     Prefix,

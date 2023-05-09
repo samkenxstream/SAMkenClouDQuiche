@@ -30,7 +30,7 @@ use std::collections::btree_map;
 use std::collections::BTreeMap;
 use std::collections::Bound;
 
-#[derive(Clone, PartialEq, PartialOrd)]
+#[derive(Clone, PartialEq, Eq, PartialOrd)]
 pub struct RangeSet {
     inner: BTreeMap<u64, u64>,
 
@@ -82,9 +82,7 @@ impl RangeSet {
         }
 
         if self.inner.len() >= self.capacity {
-            if let Some(first) = self.inner.keys().next().copied() {
-                self.inner.remove(&first);
-            }
+            self.inner.pop_first();
         }
 
         self.inner.insert(start, end);
@@ -154,7 +152,7 @@ impl RangeSet {
 
 impl Default for RangeSet {
     fn default() -> Self {
-        Self::new(std::usize::MAX)
+        Self::new(usize::MAX)
     }
 }
 
@@ -190,7 +188,7 @@ impl std::fmt::Debug for RangeSet {
             })
             .collect();
 
-        write!(f, "{:?}", ranges)
+        write!(f, "{ranges:?}")
     }
 }
 

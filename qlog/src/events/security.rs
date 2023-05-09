@@ -29,7 +29,7 @@ use serde::Serialize;
 
 use super::Bytes;
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum KeyType {
     ServerInitialSecret,
@@ -48,19 +48,34 @@ pub enum KeyType {
     Client1RttSecret,
 }
 
-#[serde_with::skip_serializing_none]
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
-pub struct KeyUpdated {
-    key_type: KeyType,
-    old: Option<Bytes>,
-    new: Option<Bytes>,
-    generation: Option<u32>,
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyUpdateOrRetiredTrigger {
+    Tls,
+    RemoteUpdate,
+    LocalUpdate,
 }
 
 #[serde_with::skip_serializing_none]
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
-pub struct KeyRetired {
-    key_type: KeyType,
-    key: Option<Bytes>,
-    generation: Option<u32>,
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct KeyUpdated {
+    pub key_type: KeyType,
+
+    pub old: Option<Bytes>,
+    pub new: Bytes,
+
+    pub generation: Option<u32>,
+
+    pub trigger: Option<KeyUpdateOrRetiredTrigger>,
+}
+
+#[serde_with::skip_serializing_none]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct KeyDiscarded {
+    pub key_type: KeyType,
+    pub key: Option<Bytes>,
+
+    pub generation: Option<u32>,
+
+    pub trigger: Option<KeyUpdateOrRetiredTrigger>,
 }
