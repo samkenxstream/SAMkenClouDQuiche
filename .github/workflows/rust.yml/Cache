@@ -1,0 +1,39 @@
+name: Rust
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+    - name: Build
+      run: cargo build --verbose
+    - name: Run tests
+      run: cargo test --verbose
+    - name: Cache
+
+  uses: actions/cache@v1.2.1
+
+  with:
+
+    # A directory to store and save the cache
+
+    path: 
+
+    # An explicit key for restoring and saving the cache
+
+    key: 
+
+    # An ordered list of keys to use for restoring the cache if no cache hit occurred for key
+
+    restore-keys: # optional
