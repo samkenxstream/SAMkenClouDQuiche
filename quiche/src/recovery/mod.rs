@@ -450,16 +450,30 @@ impl Recovery {
 
         let max_rtt = cmp::max(self.latest_rtt, self.rtt());
 
+        let sent = &mut self.sent[epoch];
+
         // Detect and mark acked packets, without removing them from the sent
         // packets list.
         for r in ranges.iter() {
             let lowest_acked_in_block = r.start;
             let largest_acked_in_block = r.end - 1;
 
-            let unacked_iter = self.sent[epoch]
-                .iter_mut()
-                // Skip packets that precede the lowest acked packet in the block.
-                .skip_while(|p| p.pkt_num < lowest_acked_in_block)
+            let first_unacked = if sent
+                .get(0)
+                .map(|p| p.pkt_num == lowest_acked_in_block)
+                .unwrap_or(true)
+            {
+                // In the happy case the first sent packet is the first to be
+                // acked, so optimize for that case.
+                0
+            } else {
+                // If it is not the first packet, try to find it using binary
+                // search.
+                sent.binary_search_by_key(&lowest_acked_in_block, |e| e.pkt_num)
+                    .unwrap_or_else(|i| i)
+            };
+
+            let unacked_iter = sent.range_mut(first_unacked..)
                 // Skip packets that follow the largest acked packet in the block.
                 .take_while(|p| p.pkt_num <= largest_acked_in_block)
                 // Skip packets that have already been acked or lost.
@@ -665,6 +679,12 @@ impl Recovery {
         self.in_flight_count[epoch] = 0;
 
         self.set_loss_detection_timer(handshake_status, now);
+    }
+
+    pub fn on_path_change(
+        &mut self, epoch: packet::Epoch, now: Instant, trace_id: &str,
+    ) -> (usize, usize) {
+        self.detect_lost_packets(epoch, now, trace_id)
     }
 
     pub fn loss_detection_timer(&self) -> Option<Instant> {
@@ -927,6 +947,7 @@ impl Recovery {
                 };
 
                 self.loss_time[epoch] = Some(loss_time);
+                break;
             }
         }
 

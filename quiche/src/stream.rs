@@ -657,9 +657,6 @@ pub struct Stream {
     /// Whether the stream was created by the local endpoint.
     pub local: bool,
 
-    /// Application data.
-    pub data: Option<Box<dyn std::any::Any + Send + Sync>>,
-
     /// The stream's urgency (lower is better). Default is `DEFAULT_URGENCY`.
     pub urgency: u8,
 
@@ -679,7 +676,6 @@ impl Stream {
             send_lowat: 1,
             bidi,
             local,
-            data: None,
             urgency: DEFAULT_URGENCY,
             incremental: true,
         }
@@ -749,6 +745,7 @@ pub fn is_bidi(stream_id: u64) -> bool {
 #[derive(Default)]
 pub struct StreamIter {
     streams: SmallVec<[u64; 8]>,
+    index: usize,
 }
 
 impl StreamIter {
@@ -756,6 +753,7 @@ impl StreamIter {
     fn from(streams: &StreamIdHashSet) -> Self {
         StreamIter {
             streams: streams.iter().copied().collect(),
+            index: 0,
         }
     }
 }
@@ -765,14 +763,16 @@ impl Iterator for StreamIter {
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        self.streams.pop()
+        let v = self.streams.get(self.index)?;
+        self.index += 1;
+        Some(*v)
     }
 }
 
 impl ExactSizeIterator for StreamIter {
     #[inline]
     fn len(&self) -> usize {
-        self.streams.len()
+        self.streams.len() - self.index
     }
 }
 

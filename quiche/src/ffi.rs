@@ -388,7 +388,7 @@ pub extern fn quiche_config_set_stateless_reset_token(
 
 #[no_mangle]
 pub extern fn quiche_config_free(config: *mut Config) {
-    unsafe { Box::from_raw(config) };
+    drop(unsafe { Box::from_raw(config) });
 }
 
 #[no_mangle]
@@ -887,32 +887,6 @@ pub extern fn quiche_conn_is_readable(conn: &Connection) -> bool {
     conn.is_readable()
 }
 
-struct AppData(*mut c_void);
-unsafe impl Send for AppData {}
-unsafe impl Sync for AppData {}
-
-#[no_mangle]
-pub extern fn quiche_conn_stream_init_application_data(
-    conn: &mut Connection, stream_id: u64, data: *mut c_void,
-) -> c_int {
-    match conn.stream_init_application_data(stream_id, AppData(data)) {
-        Ok(_) => 0,
-
-        Err(e) => e.to_c() as c_int,
-    }
-}
-
-#[no_mangle]
-pub extern fn quiche_conn_stream_application_data(
-    conn: &mut Connection, stream_id: u64,
-) -> *mut c_void {
-    match conn.stream_application_data(stream_id) {
-        Some(v) => v.downcast_mut::<AppData>().unwrap().0,
-
-        None => ptr::null_mut(),
-    }
-}
-
 #[no_mangle]
 pub extern fn quiche_conn_close(
     conn: &mut Connection, app: bool, err: u64, reason: *const u8,
@@ -1096,7 +1070,7 @@ pub extern fn quiche_stream_iter_next(
 
 #[no_mangle]
 pub extern fn quiche_stream_iter_free(iter: *mut StreamIter) {
-    unsafe { Box::from_raw(iter) };
+    drop(unsafe { Box::from_raw(iter) });
 }
 
 #[repr(C)]
@@ -1329,7 +1303,7 @@ pub extern fn quiche_conn_send_ack_eliciting_on_path(
 
 #[no_mangle]
 pub extern fn quiche_conn_free(conn: *mut Connection) {
-    unsafe { Box::from_raw(conn) };
+    drop(unsafe { Box::from_raw(conn) });
 }
 
 #[no_mangle]

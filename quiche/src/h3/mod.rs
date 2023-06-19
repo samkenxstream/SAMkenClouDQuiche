@@ -323,7 +323,7 @@ use qlog::events::EventType;
 ///
 /// [`Config::set_application_protos()`]:
 /// ../struct.Config.html#method.set_application_protos
-pub const APPLICATION_PROTOCOL: &[&[u8]] = &[b"h3", b"h3-29", b"h3-28", b"h3-27"];
+pub const APPLICATION_PROTOCOL: &[&[u8]] = &[b"h3"];
 
 // The offset used when converting HTTP/3 urgency to quiche urgency.
 const PRIORITY_URGENCY_OFFSET: u8 = 124;
@@ -1831,7 +1831,7 @@ impl Connection {
             stream::HTTP3_CONTROL_STREAM_TYPE_ID |
             stream::QPACK_ENCODER_STREAM_TYPE_ID |
             stream::QPACK_DECODER_STREAM_TYPE_ID => {
-                conn.stream_priority(stream_id, 0, true)?;
+                conn.stream_priority(stream_id, 0, false)?;
             },
 
             // TODO: Server push
@@ -1839,7 +1839,7 @@ impl Connection {
 
             // Anything else is a GREASE stream, so make it the least important.
             _ => {
-                conn.stream_priority(stream_id, 255, true)?;
+                conn.stream_priority(stream_id, 255, false)?;
             },
         }
 

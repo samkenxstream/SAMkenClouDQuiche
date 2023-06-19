@@ -418,12 +418,7 @@ use smallvec::SmallVec;
 pub const PROTOCOL_VERSION: u32 = PROTOCOL_VERSION_V1;
 
 /// Supported QUIC versions.
-///
-/// Note that the older ones might not be fully supported.
 const PROTOCOL_VERSION_V1: u32 = 0x0000_0001;
-const PROTOCOL_VERSION_DRAFT27: u32 = 0xff00_001b;
-const PROTOCOL_VERSION_DRAFT28: u32 = 0xff00_001c;
-const PROTOCOL_VERSION_DRAFT29: u32 = 0xff00_001d;
 
 /// The maximum length of a connection ID.
 pub const MAX_CONN_ID_LEN: usize = crate::packet::MAX_CID_LEN as usize;
@@ -1569,13 +1564,7 @@ pub fn retry(
 /// Returns true if the given protocol version is supported.
 #[inline]
 pub fn version_is_supported(version: u32) -> bool {
-    matches!(
-        version,
-        PROTOCOL_VERSION_V1 |
-            PROTOCOL_VERSION_DRAFT27 |
-            PROTOCOL_VERSION_DRAFT28 |
-            PROTOCOL_VERSION_DRAFT29
-    )
+    matches!(version, PROTOCOL_VERSION_V1)
 }
 
 /// Pushes a frame to the output packet if there is enough space.
@@ -2676,10 +2665,7 @@ impl Connection {
         if self.is_server && !self.got_peer_conn_id {
             self.set_initial_dcid(hdr.scid.clone(), None, recv_pid)?;
 
-            if !self.did_retry &&
-                (self.version >= PROTOCOL_VERSION_DRAFT28 ||
-                    self.version == PROTOCOL_VERSION_V1)
-            {
+            if !self.did_retry {
                 self.local_transport_params
                     .original_destination_connection_id =
                     Some(hdr.dcid.to_vec().into());
@@ -2933,8 +2919,7 @@ impl Connection {
                 recv_pid != active_path_id &&
                 self.pkt_num_spaces[epoch].largest_rx_non_probing_pkt_num == pn
             {
-                self.paths
-                    .on_peer_migrated(recv_pid, self.disable_dcid_reuse)?;
+                self.on_peer_migrated(recv_pid, self.disable_dcid_reuse, now)?;
             }
         }
 
@@ -4976,53 +4961,6 @@ impl Connection {
         self.streams.peer_streams_left_uni()
     }
 
-    /// Initializes the stream's application data.
-    ///
-    /// This can be used by applications to store per-stream information without
-    /// having to maintain their own stream map.
-    ///
-    /// Stream data can only be initialized once. Additional calls to this
-    /// method will return [`Done`].
-    ///
-    /// [`Done`]: enum.Error.html#variant.Done
-    pub fn stream_init_application_data<T>(
-        &mut self, stream_id: u64, data: T,
-    ) -> Result<()>
-    where
-        T: std::any::Any + Send + Sync,
-    {
-        // Get existing stream.
-        let stream = self.streams.get_mut(stream_id).ok_or(Error::Done)?;
-
-        if stream.data.is_some() {
-            return Err(Error::Done);
-        }
-
-        stream.data = Some(Box::new(data));
-
-        Ok(())
-    }
-
-    /// Returns the stream's application data, if any was initialized.
-    ///
-    /// This returns a reference to the application data that was initialized
-    /// by calling [`stream_init_application_data()`].
-    ///
-    /// [`stream_init_application_data()`]:
-    /// struct.Connection.html#method.stream_init_application_data
-    pub fn stream_application_data(
-        &mut self, stream_id: u64,
-    ) -> Option<&mut dyn std::any::Any> {
-        // Get existing stream.
-        let stream = self.streams.get_mut(stream_id)?;
-
-        if let Some(ref mut stream_data) = stream.data {
-            return Some(stream_data.as_mut());
-        }
-
-        None
-    }
-
     /// Returns an iterator over streams that have outstanding data to read.
     ///
     /// Note that the iterator will only include streams that were readable at
@@ -5591,7 +5529,7 @@ impl Connection {
         if self.paths.get_active_path_id().is_err() {
             match self.paths.find_candidate_path() {
                 Some(pid) =>
-                    if self.paths.set_active_path(pid).is_err() {
+                    if self.set_active_path(pid, now).is_err() {
                         // The connection cannot continue.
                         self.closed = true;
                     },
@@ -5731,7 +5669,7 @@ impl Connection {
         };
 
         // Change the active path.
-        self.paths.set_active_path(pid)?;
+        self.set_active_path(pid, time::Instant::now())?;
 
         Ok(dcid_seq)
     }
@@ -5877,6 +5815,11 @@ impl Connection {
         self.paths.pop_event()
     }
 
+    /// Returns the number of source Connection IDs that are retired.
+    pub fn retired_scids(&self) -> usize {
+        self.ids.retired_source_cids()
+    }
+
     /// Returns a source `ConnectionId` that has been retired.
     ///
     /// On success it returns a [`ConnectionId`], or `None` when there are no
@@ -5954,6 +5897,8 @@ impl Connection {
                 .filter(|(_, p)| p.local_addr() == from)
                 .map(|(_, p)| p.peer_addr())
                 .collect(),
+
+            index: 0,
         }
     }
 
@@ -6070,6 +6015,9 @@ impl Connection {
 
     /// Returns the source connection ID.
     ///
+    /// When there are multiple IDs, and if there is an active path, the ID used
+    /// on that path is returned. Otherwise the oldest ID is returned.
+    ///
     /// Note that the value returned can change throughout the connection's
     /// lifetime.
     #[inline]
@@ -6084,6 +6032,15 @@ impl Connection {
 
         let e = self.ids.oldest_scid();
         ConnectionId::from_ref(e.cid.as_ref())
+    }
+
+    /// Returns all active source connection IDs.
+    ///
+    /// An iterator is returned for all active IDs (i.e. ones that have not
+    /// been explicitly retired yet).
+    #[inline]
+    pub fn source_ids(&self) -> impl Iterator<Item = &ConnectionId> {
+        self.ids.scids_iter()
     }
 
     /// Returns the destination connection ID.
@@ -6284,58 +6241,46 @@ impl Connection {
     fn parse_peer_transport_params(
         &mut self, peer_params: TransportParams,
     ) -> Result<()> {
-        if self.version >= PROTOCOL_VERSION_DRAFT28 ||
-            self.version == PROTOCOL_VERSION_V1
-        {
-            // Validate initial_source_connection_id.
-            match &peer_params.initial_source_connection_id {
-                Some(v) if v != &self.destination_id() =>
+        // Validate initial_source_connection_id.
+        match &peer_params.initial_source_connection_id {
+            Some(v) if v != &self.destination_id() =>
+                return Err(Error::InvalidTransportParam),
+
+            Some(_) => (),
+
+            // initial_source_connection_id must be sent by
+            // both endpoints.
+            None => return Err(Error::InvalidTransportParam),
+        }
+
+        // Validate original_destination_connection_id.
+        if let Some(odcid) = &self.odcid {
+            match &peer_params.original_destination_connection_id {
+                Some(v) if v != odcid =>
                     return Err(Error::InvalidTransportParam),
 
                 Some(_) => (),
 
-                // initial_source_connection_id must be sent by
-                // both endpoints.
+                // original_destination_connection_id must be
+                // sent by the server.
+                None if !self.is_server =>
+                    return Err(Error::InvalidTransportParam),
+
+                None => (),
+            }
+        }
+
+        // Validate retry_source_connection_id.
+        if let Some(rscid) = &self.rscid {
+            match &peer_params.retry_source_connection_id {
+                Some(v) if v != rscid =>
+                    return Err(Error::InvalidTransportParam),
+
+                Some(_) => (),
+
+                // retry_source_connection_id must be sent by
+                // the server.
                 None => return Err(Error::InvalidTransportParam),
-            }
-
-            // Validate original_destination_connection_id.
-            if let Some(odcid) = &self.odcid {
-                match &peer_params.original_destination_connection_id {
-                    Some(v) if v != odcid =>
-                        return Err(Error::InvalidTransportParam),
-
-                    Some(_) => (),
-
-                    // original_destination_connection_id must be
-                    // sent by the server.
-                    None if !self.is_server =>
-                        return Err(Error::InvalidTransportParam),
-
-                    None => (),
-                }
-            }
-
-            // Validate retry_source_connection_id.
-            if let Some(rscid) = &self.rscid {
-                match &peer_params.retry_source_connection_id {
-                    Some(v) if v != rscid =>
-                        return Err(Error::InvalidTransportParam),
-
-                    Some(_) => (),
-
-                    // retry_source_connection_id must be sent by
-                    // the server.
-                    None => return Err(Error::InvalidTransportParam),
-                }
-            }
-        } else {
-            // Legacy validation of the original connection ID when
-            // stateless retry is performed, for drafts < 28.
-            if self.did_retry &&
-                peer_params.original_destination_connection_id != self.odcid
-            {
-                return Err(Error::InvalidTransportParam);
             }
         }
 
@@ -7312,6 +7257,49 @@ impl Connection {
         };
 
         Err(Error::InvalidState)
+    }
+
+    /// Sets the path with identifier 'path_id' to be active.
+    fn set_active_path(
+        &mut self, path_id: usize, now: time::Instant,
+    ) -> Result<()> {
+        if let Ok(old_active_path) = self.paths.get_active_mut() {
+            for &e in packet::Epoch::epochs(
+                packet::Epoch::Initial..=packet::Epoch::Application,
+            ) {
+                let (lost_packets, lost_bytes) = old_active_path
+                    .recovery
+                    .on_path_change(e, now, &self.trace_id);
+
+                self.lost_count += lost_packets;
+                self.lost_bytes += lost_bytes as u64;
+            }
+        }
+
+        self.paths.set_active_path(path_id)
+    }
+
+    /// Handles potential connection migration.
+    fn on_peer_migrated(
+        &mut self, new_pid: usize, disable_dcid_reuse: bool, now: time::Instant,
+    ) -> Result<()> {
+        let active_path_id = self.paths.get_active_path_id()?;
+
+        if active_path_id == new_pid {
+            return Ok(());
+        }
+
+        self.set_active_path(new_pid, now)?;
+
+        let no_spare_dcid =
+            self.paths.get_mut(new_pid)?.active_dcid_seq.is_none();
+
+        if no_spare_dcid && !disable_dcid_reuse {
+            self.paths.get_mut(new_pid)?.active_dcid_seq =
+                self.paths.get_mut(active_path_id)?.active_dcid_seq;
+        }
+
+        Ok(())
     }
 
     /// Creates a new client-side path.
@@ -9015,23 +9003,6 @@ mod tests {
         assert_eq!(pipe.server.undecryptable_pkts.len(), 0);
 
         assert!(pipe.server.is_closed());
-    }
-
-    #[test]
-    /// Tests that a pre-v1 client can connect to a v1-enabled server, by making
-    /// the server downgrade to the pre-v1 version.
-    fn handshake_downgrade_v1() {
-        let mut config = Config::new(PROTOCOL_VERSION_DRAFT29).unwrap();
-        config
-            .set_application_protos(&[b"proto1", b"proto2"])
-            .unwrap();
-        config.verify_peer(false);
-
-        let mut pipe = testing::Pipe::with_client_config(&mut config).unwrap();
-        assert_eq!(pipe.handshake(), Ok(()));
-
-        assert_eq!(pipe.client.version, PROTOCOL_VERSION_DRAFT29);
-        assert_eq!(pipe.server.version, PROTOCOL_VERSION_DRAFT29);
     }
 
     #[test]
@@ -15680,30 +15651,31 @@ mod tests {
         // Server iterators are populated
         let mut r = pipe.server.readable();
         assert_eq!(r.len(), 10);
-        assert_eq!(r.next(), Some(28));
-        assert_eq!(r.next(), Some(12));
-        assert_eq!(r.next(), Some(24));
-        assert_eq!(r.next(), Some(8));
-        assert_eq!(r.next(), Some(36));
-        assert_eq!(r.next(), Some(20));
-        assert_eq!(r.next(), Some(4));
-        assert_eq!(r.next(), Some(32));
-        assert_eq!(r.next(), Some(16));
         assert_eq!(r.next(), Some(0));
+        assert_eq!(r.next(), Some(16));
+        assert_eq!(r.next(), Some(32));
+        assert_eq!(r.next(), Some(4));
+        assert_eq!(r.next(), Some(20));
+        assert_eq!(r.next(), Some(36));
+        assert_eq!(r.next(), Some(8));
+        assert_eq!(r.next(), Some(24));
+        assert_eq!(r.next(), Some(12));
+        assert_eq!(r.next(), Some(28));
+
         assert_eq!(r.next(), None);
 
         let mut w = pipe.server.writable();
         assert_eq!(w.len(), 10);
-        assert_eq!(w.next(), Some(28));
-        assert_eq!(w.next(), Some(12));
-        assert_eq!(w.next(), Some(24));
-        assert_eq!(w.next(), Some(8));
-        assert_eq!(w.next(), Some(36));
-        assert_eq!(w.next(), Some(20));
-        assert_eq!(w.next(), Some(4));
-        assert_eq!(w.next(), Some(32));
-        assert_eq!(w.next(), Some(16));
         assert_eq!(w.next(), Some(0));
+        assert_eq!(w.next(), Some(16));
+        assert_eq!(w.next(), Some(32));
+        assert_eq!(w.next(), Some(4));
+        assert_eq!(w.next(), Some(20));
+        assert_eq!(w.next(), Some(36));
+        assert_eq!(w.next(), Some(8));
+        assert_eq!(w.next(), Some(24));
+        assert_eq!(w.next(), Some(12));
+        assert_eq!(w.next(), Some(28));
         assert_eq!(w.next(), None);
 
         // Read one stream

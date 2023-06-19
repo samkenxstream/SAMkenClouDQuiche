@@ -30,6 +30,8 @@ use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 
+use smallvec::SmallVec;
+
 use slab::Slab;
 
 use crate::Error;
@@ -467,7 +469,8 @@ impl Path {
 /// An iterator over SocketAddr.
 #[derive(Default)]
 pub struct SocketAddrIter {
-    pub(crate) sockaddrs: Vec<SocketAddr>,
+    pub(crate) sockaddrs: SmallVec<[SocketAddr; 8]>,
+    pub(crate) index: usize,
 }
 
 impl Iterator for SocketAddrIter {
@@ -475,14 +478,16 @@ impl Iterator for SocketAddrIter {
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        self.sockaddrs.pop()
+        let v = self.sockaddrs.get(self.index)?;
+        self.index += 1;
+        Some(*v)
     }
 }
 
 impl ExactSizeIterator for SocketAddrIter {
     #[inline]
     fn len(&self) -> usize {
-        self.sockaddrs.len()
+        self.sockaddrs.len() - self.index
     }
 }
 
@@ -773,28 +778,6 @@ impl PathMap {
                     new_active_path.request_validation();
                 }
             }
-        }
-
-        Ok(())
-    }
-
-    /// Handles potential connection migration.
-    pub fn on_peer_migrated(
-        &mut self, new_pid: usize, disable_dcid_reuse: bool,
-    ) -> Result<()> {
-        let active_path_id = self.get_active_path_id()?;
-
-        if active_path_id == new_pid {
-            return Ok(());
-        }
-
-        self.set_active_path(new_pid)?;
-
-        let no_spare_dcid = self.get_mut(new_pid)?.active_dcid_seq.is_none();
-
-        if no_spare_dcid && !disable_dcid_reuse {
-            self.get_mut(new_pid)?.active_dcid_seq =
-                self.get_mut(active_path_id)?.active_dcid_seq;
         }
 
         Ok(())

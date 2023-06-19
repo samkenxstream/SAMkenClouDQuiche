@@ -585,6 +585,11 @@ impl ConnectionIdentifiers {
         Ok(e.path_id)
     }
 
+    /// Returns an iterator over the source connection IDs.
+    pub fn scids_iter(&self) -> impl Iterator<Item = &ConnectionId> {
+        self.scids.iter().map(|e| &e.cid)
+    }
+
     /// Updates the Source Connection ID entry with the provided sequence number
     /// to indicate that it is now linked to the provided path ID.
     pub fn link_scid_to_path_id(
@@ -789,6 +794,13 @@ impl ConnectionIdentifiers {
     #[inline]
     pub fn active_source_cids(&self) -> usize {
         self.scids.len()
+    }
+
+    /// Returns the number of source Connection IDs that are retired. This is
+    /// only meaningful if the host uses non-zero length Source Connection IDs.
+    #[inline]
+    pub fn retired_source_cids(&self) -> usize {
+        self.retired_scids.len()
     }
 
     pub fn pop_retired_scid(&mut self) -> Option<ConnectionId<'static>> {
